@@ -518,6 +518,22 @@ html, body {
 
 .textarea { resize: vertical; min-height: 80px; }
 
+.still-living-label {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.still-living-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
 .avatar-preview {
   text-align: center;
   min-height: 60px;

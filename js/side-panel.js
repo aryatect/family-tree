@@ -208,7 +208,11 @@ function renderEditForm(container, member) {
       <label class="form-label">Date of Birth
         <input type="date" name="birthday" value="${member.birthday || ''}" class="input" />
       </label>
-      <label class="form-label">Date of Death
+      <label class="form-label still-living-label">
+        <input type="checkbox" name="stillLiving" ${!member.deathday ? 'checked' : ''} />
+        Still Living
+      </label>
+      <label class="form-label" id="deathday-label" style="${!member.deathday ? 'display:none' : ''}">Date of Death
         <input type="date" name="deathday" value="${member.deathday || ''}" class="input" />
       </label>
       <label class="form-label">Bio
@@ -226,6 +230,16 @@ function renderEditForm(container, member) {
       </div>
     </form>
   `;
+
+  // Still Living checkbox toggle
+  const stillLivingCb = container.querySelector('input[name="stillLiving"]');
+  const deathdayLabel = container.querySelector('#deathday-label');
+  stillLivingCb.addEventListener('change', () => {
+    deathdayLabel.style.display = stillLivingCb.checked ? 'none' : '';
+    if (stillLivingCb.checked) {
+      container.querySelector('input[name="deathday"]').value = '';
+    }
+  });
 
   // Live avatar preview
   const avatarInput = container.querySelector('input[name="avatar"]');
