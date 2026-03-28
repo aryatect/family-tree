@@ -52,12 +52,9 @@ export function renderTree() {
     return;
   }
 
-  const root = state.rootMemberId ? getMemberById(state.rootMemberId) : state.members[0];
-  if (!root) { renderEmptyState(); return; }
-
-  const layout = computeLayout(root);
-  drawConnections(layout);
-  drawNodes(layout);
+  const allNodes = computeMultiRootLayout();
+  drawConnections(allNodes);
+  drawNodes(allNodes);
 }
 
 function renderEmptyState() {
@@ -69,9 +66,80 @@ function renderEmptyState() {
     .text('Click "Add Person" to start building your family tree');
 }
 
-// --- Layout computation ---
+// --- Multi-root: find all connected clusters and lay them out side by side ---
 
-function computeLayout(rootMember) {
+function findClusters() {
+  const members = getMembers();
+  const visited = new Set();
+  const clusters = [];
+
+  for (const member of members) {
+    if (visited.has(member.id)) continue;
+    // BFS/DFS to find all connected members (via spouse, parent, child links)
+    const cluster = [];
+    const queue = [member.id];
+    while (queue.length > 0) {
+      const id = queue.shift();
+      if (visited.has(id)) continue;
+      const m = getMemberById(id);
+      if (!m) continue;
+      visited.add(id);
+      cluster.push(m);
+      // Traverse all relationship edges
+      for (const sid of (m.spouseIds || [])) if (!visited.has(sid)) queue.push(sid);
+      for (const cid of (m.childIds || [])) if (!visited.has(cid)) queue.push(cid);
+      if (m.fatherId && !visited.has(m.fatherId)) queue.push(m.fatherId);
+      if (m.motherId && !visited.has(m.motherId)) queue.push(m.motherId);
+    }
+    clusters.push(cluster);
+  }
+  return clusters;
+}
+
+function findClusterRoot(cluster) {
+  // Find the topmost ancestor(s) — members with no parents within the cluster
+  const clusterIds = new Set(cluster.map(m => m.id));
+  const roots = cluster.filter(m => {
+    const hasParentInCluster = (m.fatherId && clusterIds.has(m.fatherId)) ||
+                               (m.motherId && clusterIds.has(m.motherId));
+    return !hasParentInCluster;
+  });
+
+  if (roots.length === 0) return cluster[0]; // fallback: cycle, pick any
+
+  // Among roots, prefer one that has children (more likely the patriarch/matriarch)
+  // Also prefer one that is a "primary" (not a spouse-only node)
+  const withChildren = roots.filter(m => m.childIds.length > 0);
+  if (withChildren.length > 0) return withChildren[0];
+  return roots[0];
+}
+
+function computeMultiRootLayout() {
+  const clusters = findClusters();
+  const allNodes = [];
+  const CLUSTER_GAP = 100;
+  let offsetX = 0;
+
+  for (const cluster of clusters) {
+    const root = findClusterRoot(cluster);
+    const { nodes, width } = computeClusterLayout(root);
+
+    // Shift all nodes in this cluster by offsetX
+    for (const node of nodes) {
+      node.x += offsetX;
+      node.centerX += offsetX;
+      allNodes.push(node);
+    }
+
+    offsetX += width + CLUSTER_GAP;
+  }
+
+  return allNodes;
+}
+
+// --- Layout computation for a single cluster ---
+
+function computeClusterLayout(rootMember) {
   const nodes = [];
   const visited = new Set();
   const subtreeWidths = new Map();
@@ -83,7 +151,24 @@ function computeLayout(rootMember) {
   visited.clear();
   assignPositions(rootMember.id, 0, 0, visited, subtreeWidths, nodes);
 
-  return nodes;
+  // Calculate total width of this cluster
+  let minX = Infinity, maxX = -Infinity;
+  for (const n of nodes) {
+    minX = Math.min(minX, n.x);
+    const rightEdge = n.isCouple ? n.x + CARD_W * 2 + COUPLE_GAP : n.x + CARD_W;
+    maxX = Math.max(maxX, rightEdge);
+  }
+  const width = nodes.length > 0 ? maxX - minX : CARD_W;
+
+  // Normalize so cluster starts at x=0
+  if (minX !== 0 && nodes.length > 0) {
+    for (const n of nodes) {
+      n.x -= minX;
+      n.centerX -= minX;
+    }
+  }
+
+  return { nodes, width };
 }
 
 function getNodeWidth(memberId) {
