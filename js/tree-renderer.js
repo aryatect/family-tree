@@ -7,10 +7,14 @@ const CARD_H = 80;
 const COUPLE_GAP = 10;
 const H_SPACING = 60;
 const V_SPACING = 120;
+const SUBTREE_GAP = 120;
 
 let svg, g, zoomBehavior;
 let onSelectMember = null;
 let collapsedNodes = new Set();
+
+// Maps memberId -> { x, y, centerX, w, h } for every rendered card
+let cardPositions = new Map();
 
 export function initTree(container, onSelect) {
   onSelectMember = onSelect;
@@ -20,7 +24,6 @@ export function initTree(container, onSelect) {
     .attr('width', '100%')
     .attr('height', '100%');
 
-  // Defs for clip paths and patterns
   const defs = svg.append('defs');
   defs.append('clipPath')
     .attr('id', 'avatar-clip')
@@ -38,13 +41,13 @@ export function initTree(container, onSelect) {
     });
 
   svg.call(zoomBehavior);
-
   renderTree();
 }
 
 export function renderTree() {
   if (!g) return;
   g.selectAll('*').remove();
+  cardPositions = new Map();
 
   const state = getState();
   if (!state || !state.members.length) {
@@ -52,22 +55,26 @@ export function renderTree() {
     return;
   }
 
-  const allNodes = computeMultiRootLayout();
+  const allNodes = computeFullLayout();
   drawConnections(allNodes);
   drawNodes(allNodes);
 }
 
 function renderEmptyState() {
   g.append('text')
-    .attr('x', 400)
-    .attr('y', 300)
+    .attr('x', 400).attr('y', 300)
     .attr('text-anchor', 'middle')
     .attr('class', 'empty-text')
     .text('Click "Add Person" to start building your family tree');
 }
 
-// --- Multi-root: find all connected clusters and lay them out side by side ---
+// ============================================================
+// LAYOUT ENGINE — supports multiple roots per cluster
+// ============================================================
 
+/**
+ * Find all connected clusters via BFS across ALL relationship edges.
+ */
 function findClusters() {
   const members = getMembers();
   const visited = new Set();
@@ -75,7 +82,6 @@ function findClusters() {
 
   for (const member of members) {
     if (visited.has(member.id)) continue;
-    // BFS/DFS to find all connected members (via spouse, parent, child links)
     const cluster = [];
     const queue = [member.id];
     while (queue.length > 0) {
@@ -85,7 +91,6 @@ function findClusters() {
       if (!m) continue;
       visited.add(id);
       cluster.push(m);
-      // Traverse all relationship edges
       for (const sid of (m.spouseIds || [])) if (!visited.has(sid)) queue.push(sid);
       for (const cid of (m.childIds || [])) if (!visited.has(cid)) queue.push(cid);
       if (m.fatherId && !visited.has(m.fatherId)) queue.push(m.fatherId);
@@ -96,62 +101,130 @@ function findClusters() {
   return clusters;
 }
 
-function findClusterRoot(cluster) {
-  // Find the topmost ancestor(s) — members with no parents within the cluster
+/**
+ * Within a cluster, find ALL root ancestors (members whose parents are
+ * not in the data). Each root anchors its own subtree.
+ */
+function findAllRoots(cluster) {
   const clusterIds = new Set(cluster.map(m => m.id));
   const roots = cluster.filter(m => {
-    const hasParentInCluster = (m.fatherId && clusterIds.has(m.fatherId)) ||
-                               (m.motherId && clusterIds.has(m.motherId));
-    return !hasParentInCluster;
+    const hasFather = m.fatherId && clusterIds.has(m.fatherId);
+    const hasMother = m.motherId && clusterIds.has(m.motherId);
+    return !hasFather && !hasMother;
   });
+  if (roots.length === 0) return [cluster[0]];
 
-  if (roots.length === 0) return cluster[0]; // fallback: cycle, pick any
-
-  // Among roots, prefer one that has children (more likely the patriarch/matriarch)
-  // Also prefer one that is a "primary" (not a spouse-only node)
-  const withChildren = roots.filter(m => m.childIds.length > 0);
-  if (withChildren.length > 0) return withChildren[0];
-  return roots[0];
+  // De-duplicate: if both members of a couple are roots, keep only the
+  // "primary" one (the one we'll draw on the left). We pick the one
+  // who has children, or the male by convention, so the spouse renders
+  // beside them automatically.
+  const rootIds = new Set(roots.map(r => r.id));
+  const deduped = [];
+  const handled = new Set();
+  for (const r of roots) {
+    if (handled.has(r.id)) continue;
+    handled.add(r.id);
+    // If this root's spouse is also a root AND they share children, skip the spouse
+    for (const sid of r.spouseIds) {
+      if (rootIds.has(sid)) handled.add(sid);
+    }
+    deduped.push(r);
+  }
+  return deduped;
 }
 
-function computeMultiRootLayout() {
+/**
+ * Determine which root "owns" a member for layout purposes.
+ * Walk upward through father/mother until we reach a root.
+ */
+function findOwningRoot(memberId, rootIds) {
+  const visited = new Set();
+  let current = getMemberById(memberId);
+  while (current) {
+    if (visited.has(current.id)) break;
+    visited.add(current.id);
+    if (rootIds.has(current.id)) return current.id;
+    // Walk up — prefer father, then mother
+    const father = current.fatherId ? getMemberById(current.fatherId) : null;
+    if (father) { current = father; continue; }
+    const mother = current.motherId ? getMemberById(current.motherId) : null;
+    if (mother) { current = mother; continue; }
+    break;
+  }
+  return null;
+}
+
+/**
+ * Master layout: lay out every cluster, within each cluster lay out
+ * each root's subtree, placing subtrees side by side.
+ */
+function computeFullLayout() {
   const clusters = findClusters();
   const allNodes = [];
-  const CLUSTER_GAP = 100;
-  let offsetX = 0;
+  let globalOffsetX = 0;
 
   for (const cluster of clusters) {
-    const root = findClusterRoot(cluster);
-    const { nodes, width } = computeClusterLayout(root);
-
-    // Shift all nodes in this cluster by offsetX
-    for (const node of nodes) {
-      node.x += offsetX;
-      node.centerX += offsetX;
-      allNodes.push(node);
+    const roots = findAllRoots(cluster);
+    const rootIds = new Set(roots.map(r => r.id));
+    // Also include spouses of roots so they aren't treated as separate
+    for (const r of roots) {
+      for (const sid of r.spouseIds) rootIds.add(sid);
     }
 
-    offsetX += width + CLUSTER_GAP;
+    // Layout each root's subtree independently
+    const subtreeLayouts = [];
+    const globalVisited = new Set(); // track across subtrees to avoid duplicates
+
+    for (const root of roots) {
+      if (globalVisited.has(root.id)) continue;
+      const { nodes, width } = layoutSubtree(root, globalVisited);
+      subtreeLayouts.push({ nodes, width });
+    }
+
+    // Place subtrees side by side within the cluster
+    let clusterOffsetX = 0;
+    for (const st of subtreeLayouts) {
+      for (const node of st.nodes) {
+        node.x += globalOffsetX + clusterOffsetX;
+        node.centerX += globalOffsetX + clusterOffsetX;
+        allNodes.push(node);
+      }
+      clusterOffsetX += st.width + SUBTREE_GAP;
+    }
+
+    globalOffsetX += clusterOffsetX + SUBTREE_GAP;
   }
 
   return allNodes;
 }
 
-// --- Layout computation for a single cluster ---
-
-function computeClusterLayout(rootMember) {
+/**
+ * Layout a single subtree rooted at `rootMember`.
+ * `globalVisited` prevents rendering the same person in multiple subtrees.
+ */
+function layoutSubtree(rootMember, globalVisited) {
   const nodes = [];
   const visited = new Set();
   const subtreeWidths = new Map();
 
-  // First pass: compute subtree widths bottom-up
+  // Copy globalVisited so we respect already-rendered members
+  for (const id of globalVisited) visited.add(id);
+
   computeSubtreeWidth(rootMember.id, visited, subtreeWidths);
 
-  // Second pass: assign positions top-down
+  // Reset visited for position pass (but keep globalVisited exclusions)
   visited.clear();
+  for (const id of globalVisited) visited.add(id);
+
   assignPositions(rootMember.id, 0, 0, visited, subtreeWidths, nodes);
 
-  // Calculate total width of this cluster
+  // Mark all rendered members as globally visited
+  for (const n of nodes) {
+    globalVisited.add(n.member.id);
+    if (n.spouse) globalVisited.add(n.spouse.id);
+  }
+
+  // Normalize positions so subtree starts at x=0
   let minX = Infinity, maxX = -Infinity;
   for (const n of nodes) {
     minX = Math.min(minX, n.x);
@@ -159,9 +232,7 @@ function computeClusterLayout(rootMember) {
     maxX = Math.max(maxX, rightEdge);
   }
   const width = nodes.length > 0 ? maxX - minX : CARD_W;
-
-  // Normalize so cluster starts at x=0
-  if (minX !== 0 && nodes.length > 0) {
+  if (nodes.length > 0 && minX !== 0) {
     for (const n of nodes) {
       n.x -= minX;
       n.centerX -= minX;
@@ -171,31 +242,31 @@ function computeClusterLayout(rootMember) {
   return { nodes, width };
 }
 
+// ============================================================
+// SUBTREE WIDTH COMPUTATION (recursive, top-down)
+// ============================================================
+
 function getNodeWidth(memberId) {
   const member = getMemberById(memberId);
   if (!member) return CARD_W;
-  // If has spouse, the couple takes more width
-  if (member.spouseIds.length > 0) {
-    return CARD_W * 2 + COUPLE_GAP;
-  }
+  if (member.spouseIds.length > 0) return CARD_W * 2 + COUPLE_GAP;
   return CARD_W;
 }
 
 function getChildren(memberId) {
   const member = getMemberById(memberId);
   if (!member) return [];
-  // Collect all unique children from this member and their spouses
-  const childSet = new Set(member.childIds || []);
-  return [...childSet];
+  return [...new Set(member.childIds || [])];
 }
 
 function computeSubtreeWidth(memberId, visited, widthMap) {
   if (visited.has(memberId)) return widthMap.get(memberId) || CARD_W;
   visited.add(memberId);
 
-  // Also mark spouses as visited to avoid double-processing
   const member = getMemberById(memberId);
   if (!member) { widthMap.set(memberId, CARD_W); return CARD_W; }
+
+  // Mark spouse as visited so they aren't processed as separate root
   for (const sid of member.spouseIds) visited.add(sid);
 
   if (collapsedNodes.has(memberId)) {
@@ -205,6 +276,16 @@ function computeSubtreeWidth(memberId, visited, widthMap) {
   }
 
   const children = getChildren(memberId);
+  // Also include spouse's children (in case children are only on spouse)
+  for (const sid of member.spouseIds) {
+    const spouse = getMemberById(sid);
+    if (spouse) {
+      for (const cid of (spouse.childIds || [])) {
+        if (!children.includes(cid)) children.push(cid);
+      }
+    }
+  }
+
   if (children.length === 0) {
     const w = getNodeWidth(memberId);
     widthMap.set(memberId, w);
@@ -215,13 +296,17 @@ function computeSubtreeWidth(memberId, visited, widthMap) {
   for (const cid of children) {
     totalChildWidth += computeSubtreeWidth(cid, visited, widthMap) + H_SPACING;
   }
-  totalChildWidth -= H_SPACING; // remove trailing spacing
+  totalChildWidth -= H_SPACING;
 
   const nodeW = getNodeWidth(memberId);
   const w = Math.max(nodeW, totalChildWidth);
   widthMap.set(memberId, w);
   return w;
 }
+
+// ============================================================
+// POSITION ASSIGNMENT (recursive, top-down)
+// ============================================================
 
 function assignPositions(memberId, x, y, visited, widthMap, nodes) {
   if (visited.has(memberId)) return;
@@ -243,27 +328,23 @@ function assignPositions(memberId, x, y, visited, widthMap, nodes) {
     const coupleW = CARD_W * 2 + COUPLE_GAP;
     const leftX = centerX - coupleW / 2;
     nodes.push({
-      member,
-      x: leftX,
-      y,
-      isCouple: true,
-      spouse,
-      centerX
+      member, x: leftX, y, isCouple: true, spouse, centerX
     });
   } else {
     nodes.push({
-      member,
-      x: centerX - CARD_W / 2,
-      y,
-      isCouple: false,
-      spouse: null,
-      centerX
+      member, x: centerX - CARD_W / 2, y, isCouple: false, spouse: null, centerX
     });
   }
 
-  // Position children
+  // Collect all children (from this member + spouse)
   if (!collapsedNodes.has(memberId)) {
     const children = getChildren(memberId);
+    if (spouse) {
+      for (const cid of (spouse.childIds || [])) {
+        if (!children.includes(cid)) children.push(cid);
+      }
+    }
+
     if (children.length > 0) {
       let totalChildWidth = 0;
       for (const cid of children) {
@@ -283,18 +364,37 @@ function assignPositions(memberId, x, y, visited, widthMap, nodes) {
   }
 }
 
-// --- Drawing ---
+// ============================================================
+// DRAWING
+// ============================================================
 
 function drawConnections(nodes) {
   const connGroup = g.append('g').attr('class', 'connections');
-  const nodeMap = new Map();
+
+  // Build a position map for every rendered card (both primary and spouse)
+  const posMap = new Map(); // memberId -> { cx, cy, x, y }
   for (const n of nodes) {
-    nodeMap.set(n.member.id, n);
-    if (n.spouse) nodeMap.set(n.spouse.id, n);
+    posMap.set(n.member.id, {
+      cx: n.isCouple ? n.x + CARD_W / 2 : n.centerX,
+      cy: n.y + CARD_H / 2,
+      x: n.x,
+      y: n.y,
+      centerX: n.centerX
+    });
+    if (n.spouse) {
+      const spouseX = n.x + CARD_W + COUPLE_GAP;
+      posMap.set(n.spouse.id, {
+        cx: spouseX + CARD_W / 2,
+        cy: n.y + CARD_H / 2,
+        x: spouseX,
+        y: n.y,
+        centerX: spouseX + CARD_W / 2
+      });
+    }
   }
 
   for (const node of nodes) {
-    // Spouse connector
+    // Spouse connector line
     if (node.isCouple && node.spouse) {
       const x1 = node.x + CARD_W;
       const x2 = node.x + CARD_W + COUPLE_GAP;
@@ -305,46 +405,76 @@ function drawConnections(nodes) {
         .attr('class', 'conn-spouse');
     }
 
-    // Parent-child connectors
-    if (!collapsedNodes.has(node.member.id)) {
-      const children = getChildren(node.member.id);
-      if (children.length > 0) {
-        const parentY = node.y + CARD_H;
-        const midY = node.y + CARD_H + V_SPACING / 2;
-        const childY = node.y + CARD_H + V_SPACING;
+    // Parent-child connectors: draw from this node (as parent) to its children
+    const parentMember = node.member;
+    if (collapsedNodes.has(parentMember.id)) continue;
 
-        // Vertical line down from parent center
+    // Gather all children of this couple
+    const childIdsSet = new Set(parentMember.childIds || []);
+    if (node.spouse) {
+      for (const cid of (node.spouse.childIds || [])) childIdsSet.add(cid);
+    }
+    const childIds = [...childIdsSet];
+
+    // Only draw from children that are actually rendered
+    const renderedChildren = childIds.filter(cid => posMap.has(cid));
+    if (renderedChildren.length === 0) continue;
+
+    const parentY = node.y + CARD_H;
+    const midY = node.y + CARD_H + V_SPACING / 2;
+
+    // Vertical line down from couple center
+    connGroup.append('line')
+      .attr('x1', node.centerX).attr('y1', parentY)
+      .attr('x2', node.centerX).attr('y2', midY)
+      .attr('class', 'conn-vertical');
+
+    const childCXs = renderedChildren.map(cid => posMap.get(cid).cx);
+
+    if (childCXs.length > 0) {
+      // Include parent centerX in horizontal bar range so line connects
+      const allXs = [...childCXs, node.centerX];
+      const minX = Math.min(...allXs);
+      const maxX = Math.max(...allXs);
+
+      if (maxX > minX) {
         connGroup.append('line')
-          .attr('x1', node.centerX).attr('y1', parentY)
-          .attr('x2', node.centerX).attr('y2', midY)
+          .attr('x1', minX).attr('y1', midY)
+          .attr('x2', maxX).attr('y2', midY)
+          .attr('class', 'conn-horizontal');
+      }
+
+      // Vertical drops to each child
+      for (const cx of childCXs) {
+        const childNode = renderedChildren.find(cid => posMap.get(cid).cx === cx);
+        const childY = posMap.get(childNode)?.y ?? (node.y + CARD_H + V_SPACING);
+        connGroup.append('line')
+          .attr('x1', cx).attr('y1', midY)
+          .attr('x2', cx).attr('y2', childY)
           .attr('class', 'conn-vertical');
+      }
+    }
+  }
 
-        // Find child positions
-        const childPositions = [];
-        for (const cid of children) {
-          const cn = nodeMap.get(cid);
-          if (cn) childPositions.push(cn.centerX);
-        }
-
-        if (childPositions.length > 0) {
-          // Horizontal bar
-          const minX = Math.min(...childPositions);
-          const maxX = Math.max(...childPositions);
-          if (childPositions.length > 1) {
-            connGroup.append('line')
-              .attr('x1', minX).attr('y1', midY)
-              .attr('x2', maxX).attr('y2', midY)
-              .attr('class', 'conn-horizontal');
-          }
-
-          // Vertical drops to each child
-          for (const cx of childPositions) {
-            connGroup.append('line')
-              .attr('x1', cx).attr('y1', midY)
-              .attr('x2', cx).attr('y2', childY)
-              .attr('class', 'conn-vertical');
-          }
-        }
+  // Cross-subtree spouse connectors: if a spouse was rendered in a different
+  // subtree, draw a dashed line between them
+  const members = getMembers();
+  for (const m of members) {
+    if (!posMap.has(m.id)) continue;
+    for (const sid of m.spouseIds) {
+      if (!posMap.has(sid)) continue;
+      const p1 = posMap.get(m.id);
+      const p2 = posMap.get(sid);
+      // Only draw if they're NOT already rendered as a couple in the same node
+      const alreadyCouple = nodes.some(n =>
+        (n.member.id === m.id && n.spouse?.id === sid) ||
+        (n.member.id === sid && n.spouse?.id === m.id)
+      );
+      if (!alreadyCouple && m.id < sid) { // m.id < sid to draw only once
+        connGroup.append('line')
+          .attr('x1', p1.cx).attr('y1', p1.cy)
+          .attr('x2', p2.cx).attr('y2', p2.cy)
+          .attr('class', 'conn-spouse');
       }
     }
   }
@@ -362,6 +492,9 @@ function drawNodes(nodes) {
 }
 
 function drawCard(parent, member, x, y) {
+  // Store position for zoom-to-member
+  cardPositions.set(member.id, { x, y });
+
   const card = parent.append('g')
     .attr('class', `card card--${member.gender === 'F' ? 'female' : member.gender === 'O' ? 'other' : 'male'}`)
     .attr('transform', `translate(${x}, ${y})`)
@@ -371,69 +504,50 @@ function drawCard(parent, member, x, y) {
       if (onSelectMember) onSelectMember(member.id);
     });
 
-  // Card background
   card.append('rect')
-    .attr('width', CARD_W)
-    .attr('height', CARD_H)
-    .attr('rx', 10)
-    .attr('class', 'card-bg');
+    .attr('width', CARD_W).attr('height', CARD_H)
+    .attr('rx', 10).attr('class', 'card-bg');
 
-  // Gender accent bar
   card.append('rect')
-    .attr('width', 4)
-    .attr('height', CARD_H)
-    .attr('rx', 2)
-    .attr('class', 'card-accent');
+    .attr('width', 4).attr('height', CARD_H)
+    .attr('rx', 2).attr('class', 'card-accent');
 
-  // Avatar
   const avatarG = card.append('g')
     .attr('transform', `translate(36, ${CARD_H / 2})`);
 
   if (member.avatar) {
     avatarG.append('clipPath')
       .attr('id', `clip-${member.id}`)
-      .append('circle')
-      .attr('r', 22);
-
+      .append('circle').attr('r', 22);
     avatarG.append('image')
       .attr('href', getImageUrl(member.avatar, 200))
-      .attr('x', -22)
-      .attr('y', -22)
-      .attr('width', 44)
-      .attr('height', 44)
+      .attr('x', -22).attr('y', -22)
+      .attr('width', 44).attr('height', 44)
       .attr('clip-path', `url(#clip-${member.id})`)
       .attr('preserveAspectRatio', 'xMidYMid slice');
   } else {
-    avatarG.append('circle')
-      .attr('r', 22)
-      .attr('class', 'avatar-placeholder');
-
+    avatarG.append('circle').attr('r', 22).attr('class', 'avatar-placeholder');
     avatarG.append('text')
-      .attr('text-anchor', 'middle')
-      .attr('dy', '0.35em')
+      .attr('text-anchor', 'middle').attr('dy', '0.35em')
       .attr('class', 'avatar-initials')
       .text(getInitials(member));
   }
 
-  // Name
   const name = `${member.firstName} ${member.lastName}`.trim();
   card.append('text')
-    .attr('x', 68)
-    .attr('y', CARD_H / 2 - 8)
+    .attr('x', 68).attr('y', CARD_H / 2 - 8)
     .attr('class', 'card-name')
     .text(name.length > 14 ? name.substring(0, 13) + '…' : name);
 
-  // Dates
   const dates = formatDates(member);
   if (dates) {
     card.append('text')
-      .attr('x', 68)
-      .attr('y', CARD_H / 2 + 10)
+      .attr('x', 68).attr('y', CARD_H / 2 + 10)
       .attr('class', 'card-dates')
       .text(dates);
   }
 
-  // Collapse/expand toggle for nodes with children
+  // Collapse toggle — show for members OR their spouses who have children
   const children = getChildren(member.id);
   if (children.length > 0) {
     const toggleG = card.append('g')
@@ -444,28 +558,23 @@ function drawCard(parent, member, x, y) {
         event.stopPropagation();
         toggleCollapse(member.id);
       });
-
-    toggleG.append('circle')
-      .attr('r', 10)
-      .attr('class', 'toggle-circle');
-
-    const isCollapsed = collapsedNodes.has(member.id);
+    toggleG.append('circle').attr('r', 10).attr('class', 'toggle-circle');
     toggleG.append('text')
-      .attr('text-anchor', 'middle')
-      .attr('dy', '0.35em')
+      .attr('text-anchor', 'middle').attr('dy', '0.35em')
       .attr('class', 'toggle-text')
-      .text(isCollapsed ? '+' : '−');
+      .text(collapsedNodes.has(member.id) ? '+' : '−');
   }
 }
 
 function toggleCollapse(memberId) {
-  if (collapsedNodes.has(memberId)) {
-    collapsedNodes.delete(memberId);
-  } else {
-    collapsedNodes.add(memberId);
-  }
+  if (collapsedNodes.has(memberId)) collapsedNodes.delete(memberId);
+  else collapsedNodes.add(memberId);
   renderTree();
 }
+
+// ============================================================
+// NAVIGATION
+// ============================================================
 
 export function fitToScreen() {
   if (!svg || !g) return;
@@ -492,38 +601,20 @@ export function fitToScreen() {
 
 export function zoomToMember(memberId) {
   if (!svg || !g) return;
-  const card = g.select(`.card`).filter(function () {
-    return this.__memberId === memberId;
-  });
-  // Fallback: search all cards
-  const allCards = g.selectAll('.card');
-  let targetX = 0, targetY = 0, found = false;
-  allCards.each(function () {
-    const transform = d3.select(this).attr('transform');
-    const match = transform.match(/translate\(([\d.-]+),\s*([\d.-]+)\)/);
-    if (match) {
-      // Check card text content for member name
-      const nameEl = d3.select(this).select('.card-name');
-      const member = getMemberById(memberId);
-      if (member && nameEl.text().startsWith(member.firstName)) {
-        targetX = parseFloat(match[1]) + CARD_W / 2;
-        targetY = parseFloat(match[2]) + CARD_H / 2;
-        found = true;
-      }
-    }
-  });
+  const pos = cardPositions.get(memberId);
+  if (!pos) return;
 
-  if (found) {
-    const svgEl = svg.node();
-    const fullWidth = svgEl.clientWidth;
-    const fullHeight = svgEl.clientHeight;
-    const scale = 1;
-    svg.transition().duration(500)
-      .call(zoomBehavior.transform,
-        d3.zoomIdentity
-          .translate(fullWidth / 2 - targetX * scale, fullHeight / 2 - targetY * scale)
-          .scale(scale));
-  }
+  const svgEl = svg.node();
+  const fullWidth = svgEl.clientWidth;
+  const fullHeight = svgEl.clientHeight;
+  const targetX = pos.x + CARD_W / 2;
+  const targetY = pos.y + CARD_H / 2;
+
+  svg.transition().duration(500)
+    .call(zoomBehavior.transform,
+      d3.zoomIdentity
+        .translate(fullWidth / 2 - targetX, fullHeight / 2 - targetY)
+        .scale(1));
 }
 
 export function expandAll() {
