@@ -284,6 +284,7 @@ html, body {
 /* Connectors */
 .conn-spouse { stroke: var(--color-accent); stroke-width: 2; stroke-dasharray: 4,4; }
 .conn-vertical, .conn-horizontal { stroke: var(--color-connector); stroke-width: 2; }
+.conn-ancestry { stroke: var(--color-accent); stroke-width: 2; stroke-dasharray: 6,4; opacity: 0.7; }
 
 /* Tree controls overlay */
 .tree-controls {
@@ -753,6 +754,83 @@ html, body {
   gap: 8px;
   margin-top: 8px;
   justify-content: flex-end;
+}
+
+/* === Auth Overlay === */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+}
+
+.auth-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 40px 32px;
+  width: 360px;
+  max-width: 90vw;
+  box-shadow: var(--shadow-lg);
+  text-align: center;
+}
+
+.auth-icon {
+  color: var(--color-primary);
+  margin-bottom: 16px;
+}
+
+.auth-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  color: var(--color-text);
+}
+
+.auth-subtitle {
+  font-size: 14px;
+  color: var(--color-text-muted);
+  margin-bottom: 24px;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-input {
+  text-align: center;
+  font-size: 16px;
+  padding: 10px 14px;
+}
+
+.auth-btn {
+  width: 100%;
+  padding: 10px;
+  font-size: 15px;
+}
+
+.auth-error {
+  color: #e53e3e;
+  font-size: 13px;
+  min-height: 18px;
+  margin: 0;
+}
+
+@keyframes authShake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-10px); }
+  40% { transform: translateX(10px); }
+  60% { transform: translateX(-6px); }
+  80% { transform: translateX(6px); }
+}
+
+.auth-shake {
+  animation: authShake 0.4s ease;
 }
 
 /* === Responsive === */

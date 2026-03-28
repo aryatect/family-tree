@@ -2,6 +2,7 @@ import { loadData, getState, setFamilyName, addMember, exportData, importData, r
 import { initTree, renderTree, fitToScreen, zoomToMember, expandAll, collapseAll } from './tree-renderer.js';
 import { initSidePanel, openPanel, closePanel } from './side-panel.js';
 import { debounce } from './utils.js';
+import { requireAuth, logout } from './auth.js';
 
 async function init() {
   await loadData();
@@ -133,6 +134,9 @@ async function init() {
     }
   });
 
+  // Logout
+  document.getElementById('btn-logout').addEventListener('click', logout);
+
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closePanel();
@@ -179,4 +183,4 @@ function updateThemeIcon(theme) {
     : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 }
 
-init();
+requireAuth().then(() => init());
