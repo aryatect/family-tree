@@ -755,33 +755,28 @@ function isCoupleCollapsedUp(memberId) {
   return false;
 }
 
-/** Toggle upward collapse for a member AND all their spouses/siblings in sync */
+/** Toggle upward collapse for a member only (not their spouse — parents are separate) */
 function toggleCoupleCollapseUp(memberId) {
   const m = getMemberById(memberId);
-  const coupleIds = [memberId];
-  if (m) for (const sid of m.spouseIds) coupleIds.push(sid);
+  if (!m) return;
 
-  // Check if parents are currently visible (not collapsed by anyone)
-  const parentsVisible = (m.fatherId && !computeHiddenSet().has(m.fatherId)) ||
-                         (m.motherId && !computeHiddenSet().has(m.motherId));
-  const shouldCollapse = parentsVisible;
+  // Check if THIS member's parents are currently visible
+  const hidden = computeHiddenSet();
+  const parentsVisible = (m.fatherId && !hidden.has(m.fatherId)) ||
+                         (m.motherId && !hidden.has(m.motherId));
 
-  if (shouldCollapse) {
-    for (const id of coupleIds) collapsedUpNodes.add(id);
+  if (parentsVisible) {
+    // Collapse: only hide THIS member's ancestors (not spouse's)
+    collapsedUpNodes.add(memberId);
   } else {
-    // Expanding: clear collapsedUp for self, spouse, AND all siblings
-    for (const id of coupleIds) collapsedUpNodes.delete(id);
-    // Also clear siblings who share the same parents
-    if (m) {
-      const siblingParentIds = [m.fatherId, m.motherId].filter(Boolean);
-      for (const pid of siblingParentIds) {
-        const parent = getMemberById(pid);
-        if (parent) {
-          for (const cid of parent.childIds) {
-            collapsedUpNodes.delete(cid);
-            const sibling = getMemberById(cid);
-            if (sibling) for (const sid of sibling.spouseIds) collapsedUpNodes.delete(sid);
-          }
+    // Expanding: clear for self AND all siblings who share the same parents
+    collapsedUpNodes.delete(memberId);
+    const siblingParentIds = [m.fatherId, m.motherId].filter(Boolean);
+    for (const pid of siblingParentIds) {
+      const parent = getMemberById(pid);
+      if (parent) {
+        for (const cid of parent.childIds) {
+          collapsedUpNodes.delete(cid);
         }
       }
     }
