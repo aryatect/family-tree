@@ -11,8 +11,11 @@ const SUBTREE_GAP = 120;
 
 let svg, g, zoomBehavior;
 let onSelectMember = null;
+const fullName = (m) => `${m.firstName} ${m.lastName}`.trim();
 let collapsedNodes = new Set();
 let cardPositions = new Map();
+
+let minimapSvg, minimapG, minimapViewbox;
 
 export function initTree(container, onSelect) {
   onSelectMember = onSelect;
@@ -24,8 +27,27 @@ export function initTree(container, onSelect) {
   g = svg.append('g').attr('class', 'tree-canvas');
   zoomBehavior = d3.zoom()
     .scaleExtent([0.1, 3])
-    .on('zoom', (event) => g.attr('transform', event.transform));
+    .on('zoom', (event) => {
+      g.attr('transform', event.transform);
+      updateMinimap(event.transform);
+    });
   svg.call(zoomBehavior);
+
+  // Create minimap
+  const minimapWrap = document.createElement('div');
+  minimapWrap.className = 'minimap';
+  minimapWrap.id = 'minimap';
+  container.appendChild(minimapWrap);
+  minimapSvg = d3.select(minimapWrap).append('svg')
+    .attr('width', '100%').attr('height', '100%');
+  minimapG = minimapSvg.append('g');
+  minimapViewbox = minimapSvg.append('rect')
+    .attr('class', 'minimap-viewbox')
+    .attr('fill', 'rgba(74, 111, 165, 0.15)')
+    .attr('stroke', 'var(--color-primary)')
+    .attr('stroke-width', 2)
+    .attr('rx', 3);
+
   renderTree();
 }
 
@@ -43,8 +65,10 @@ export function renderTree() {
   }
 
   const allNodes = computeFullLayout();
+  drawGenerationLabels(allNodes);
   drawConnections(allNodes);
   drawNodes(allNodes);
+  renderMinimap(allNodes);
 }
 
 // ============================================================
@@ -351,6 +375,53 @@ function assignPos(memberId, x, y, visited, widthMap, nodes, myLineage, hidden) 
 // DRAWING
 // ============================================================
 
+function drawGenerationLabels(nodes) {
+  if (nodes.length === 0) return;
+  const genGroup = g.append('g').attr('class', 'generation-labels');
+
+  // Group nodes by Y level (generation)
+  const yLevels = new Map();
+  for (const n of nodes) {
+    const y = Math.round(n.y);
+    if (!yLevels.has(y)) yLevels.set(y, []);
+    yLevels.get(y).push(n);
+  }
+
+  // Sort by Y to assign generation numbers
+  const sortedYs = [...yLevels.keys()].sort((a, b) => a - b);
+
+  // Find leftmost x across all nodes
+  let minX = Infinity;
+  for (const n of nodes) minX = Math.min(minX, n.x);
+
+  const genNames = ['Generation 1', 'Generation 2', 'Generation 3', 'Generation 4',
+    'Generation 5', 'Generation 6', 'Generation 7', 'Generation 8'];
+
+  for (let i = 0; i < sortedYs.length; i++) {
+    const y = sortedYs[i];
+    const label = genNames[i] || `Generation ${i + 1}`;
+
+    genGroup.append('text')
+      .attr('x', minX - 30)
+      .attr('y', y + CARD_H / 2)
+      .attr('text-anchor', 'end')
+      .attr('class', 'gen-label')
+      .text(label);
+
+    // Faint horizontal line across the generation
+    let maxX = -Infinity;
+    for (const n of yLevels.get(y)) {
+      maxX = Math.max(maxX, n.isCouple ? n.x + CARD_W * 2 + COUPLE_GAP : n.x + CARD_W);
+    }
+    genGroup.append('line')
+      .attr('x1', minX - 20)
+      .attr('y1', y + CARD_H + 15)
+      .attr('x2', maxX + 20)
+      .attr('y2', y + CARD_H + 15)
+      .attr('class', 'gen-line');
+  }
+}
+
 function drawConnections(nodes) {
   const connGroup = g.append('g').attr('class', 'connections');
 
@@ -488,6 +559,19 @@ function drawCard(parent, member, x, y) {
       if (onSelectMember) onSelectMember(member.id);
     });
 
+  // Tooltip on hover
+  const tooltipLines = [fullName(member)];
+  const dates = formatDates(member);
+  if (dates) tooltipLines.push(dates);
+  if (member.bio) tooltipLines.push(member.bio.length > 80 ? member.bio.substring(0, 77) + '...' : member.bio);
+  const father = member.fatherId ? getMemberById(member.fatherId) : null;
+  const mother = member.motherId ? getMemberById(member.motherId) : null;
+  if (father) tooltipLines.push('Father: ' + fullName(father));
+  if (mother) tooltipLines.push('Mother: ' + fullName(mother));
+  const spouses = member.spouseIds.map(id => getMemberById(id)).filter(Boolean);
+  if (spouses.length) tooltipLines.push('Spouse: ' + spouses.map(fullName).join(', '));
+  card.append('title').text(tooltipLines.join('\n'));
+
   card.append('rect').attr('width', CARD_W).attr('height', CARD_H)
     .attr('rx', 10).attr('class', 'card-bg');
   card.append('rect').attr('width', 4).attr('height', CARD_H)
@@ -508,13 +592,12 @@ function drawCard(parent, member, x, y) {
       .attr('class', 'avatar-initials').text(getInitials(member));
   }
 
-  const name = `${member.firstName} ${member.lastName}`.trim();
+  const name = fullName(member);
   const maxNameLen = 18;
   card.append('text').attr('x', 68).attr('y', CARD_H / 2 - 10)
     .attr('class', 'card-name')
     .text(name.length > maxNameLen ? name.substring(0, maxNameLen - 1) + '…' : name);
 
-  const dates = formatDates(member);
   if (dates) {
     card.append('text').attr('x', 68).attr('y', CARD_H / 2 + 8)
       .attr('class', 'card-dates').text(dates);
@@ -614,6 +697,73 @@ export function zoomToMember(memberId) {
     .call(zoomBehavior.transform, d3.zoomIdentity
       .translate(svgEl.clientWidth / 2 - (pos.x + CARD_W / 2), svgEl.clientHeight / 2 - (pos.y + CARD_H / 2))
       .scale(1));
+}
+
+function renderMinimap(allNodes) {
+  if (!minimapG) return;
+  minimapG.selectAll('*').remove();
+  if (allNodes.length === 0) return;
+
+  // Compute bounds of tree
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of allNodes) {
+    minX = Math.min(minX, n.x);
+    minY = Math.min(minY, n.y);
+    maxX = Math.max(maxX, n.isCouple ? n.x + CARD_W * 2 + COUPLE_GAP : n.x + CARD_W);
+    maxY = Math.max(maxY, n.y + CARD_H);
+  }
+  const tw = maxX - minX, th = maxY - minY;
+  if (tw === 0 || th === 0) return;
+
+  const mmW = 180, mmH = 120;
+  const pad = 10;
+  const scale = Math.min((mmW - pad * 2) / tw, (mmH - pad * 2) / th);
+  const ox = pad + ((mmW - pad * 2) - tw * scale) / 2 - minX * scale;
+  const oy = pad + ((mmH - pad * 2) - th * scale) / 2 - minY * scale;
+
+  minimapG.attr('transform', `translate(${ox}, ${oy}) scale(${scale})`);
+
+  for (const n of allNodes) {
+    minimapG.append('rect')
+      .attr('x', n.x).attr('y', n.y)
+      .attr('width', CARD_W).attr('height', CARD_H)
+      .attr('rx', 4)
+      .attr('fill', n.member.gender === 'F' ? 'var(--color-female)' : n.member.gender === 'M' ? 'var(--color-male)' : 'var(--color-other)')
+      .attr('opacity', 0.6);
+    if (n.isCouple && n.spouse) {
+      minimapG.append('rect')
+        .attr('x', n.x + CARD_W + COUPLE_GAP).attr('y', n.y)
+        .attr('width', CARD_W).attr('height', CARD_H)
+        .attr('rx', 4)
+        .attr('fill', n.spouse.gender === 'F' ? 'var(--color-female)' : 'var(--color-male)')
+        .attr('opacity', 0.6);
+    }
+  }
+
+  // Store for viewbox calc
+  minimapSvg.datum({ scale, ox, oy, minX, minY, tw, th });
+  updateMinimap(d3.zoomTransform(svg.node()));
+}
+
+function updateMinimap(transform) {
+  if (!minimapSvg || !minimapViewbox) return;
+  const data = minimapSvg.datum();
+  if (!data) return;
+
+  const svgEl = svg.node();
+  const vw = svgEl.clientWidth, vh = svgEl.clientHeight;
+
+  // Inverse transform to find visible area in tree coords
+  const x0 = -transform.x / transform.k;
+  const y0 = -transform.y / transform.k;
+  const w = vw / transform.k;
+  const h = vh / transform.k;
+
+  minimapViewbox
+    .attr('x', x0 * data.scale + data.ox)
+    .attr('y', y0 * data.scale + data.oy)
+    .attr('width', w * data.scale)
+    .attr('height', h * data.scale);
 }
 
 export function expandAll() { collapsedNodes.clear(); renderTree(); }
