@@ -440,11 +440,12 @@ function drawConnections(nodes) {
     }
   }
 
-  // Track which children have been connected to a parent (within-subtree)
   const connectedChildren = new Set();
 
+  // ── PASS 1: collect all planned parent→child connections ──
+  const planned = [];
   for (const node of nodes) {
-    // Spouse connector
+    // Spouse connector (draw immediately — no overlap risk)
     if (node.isCouple && node.spouse) {
       connGroup.append('line')
         .attr('x1', node.x + CARD_W).attr('y1', node.y + CARD_H / 2)
@@ -452,41 +453,84 @@ function drawConnections(nodes) {
         .attr('class', 'conn-spouse');
     }
 
-    // Parent → child connectors (WITHIN subtree only)
     if (collapsedNodes.has(node.member.id)) continue;
     const allChildIds = new Set(node.member.childIds || []);
     if (node.spouse) {
       for (const cid of (node.spouse.childIds || [])) allChildIds.add(cid);
     }
 
-    // Only connect to children rendered directly below (same subtree, y = node.y + CARD_H + V_SPACING)
     const directChildren = [...allChildIds].filter(cid => {
       const cp = posMap.get(cid);
       return cp && Math.abs(cp.y - (node.y + CARD_H + V_SPACING)) < 5;
     });
-
     if (directChildren.length === 0) continue;
-
-    const parentY = node.y + CARD_H;
-    const midY = node.y + CARD_H + V_SPACING / 2;
-
-    connGroup.append('line')
-      .attr('x1', node.centerX).attr('y1', parentY)
-      .attr('x2', node.centerX).attr('y2', midY)
-      .attr('class', 'conn-vertical');
 
     const childCXs = directChildren.map(cid => posMap.get(cid).cx);
     const allXs = [...childCXs, node.centerX];
-    const minX = Math.min(...allXs);
-    const maxX = Math.max(...allXs);
+    const barMinX = Math.min(...allXs);
+    const barMaxX = Math.max(...allXs);
+    const baseMidY = node.y + CARD_H + V_SPACING / 2;
 
-    if (maxX > minX) {
+    planned.push({ node, directChildren, barMinX, barMaxX, baseMidY });
+  }
+
+  // ── PASS 2: assign lane offsets for overlapping horizontal bars ──
+  const LANE_GAP = 12;
+  // Group by baseMidY
+  const byMidY = new Map();
+  for (const p of planned) {
+    const key = Math.round(p.baseMidY);
+    if (!byMidY.has(key)) byMidY.set(key, []);
+    byMidY.get(key).push(p);
+  }
+
+  for (const [, group] of byMidY) {
+    if (group.length <= 1) { group[0].lane = 0; continue; }
+    // Sort by barMinX for consistent lane assignment
+    group.sort((a, b) => a.barMinX - b.barMinX);
+    // Greedy lane assignment: find lowest lane that doesn't overlap
+    for (const p of group) {
+      let lane = 0;
+      while (true) {
+        const conflict = group.some(other =>
+          other !== p && other.lane === lane &&
+          other.barMinX < p.barMaxX && other.barMaxX > p.barMinX
+        );
+        if (!conflict) break;
+        lane++;
+      }
+      p.lane = lane;
+    }
+    // Center the lanes around the base midY
+    const maxLane = Math.max(...group.map(p => p.lane));
+    for (const p of group) {
+      p.midY = p.baseMidY + (p.lane - maxLane / 2) * LANE_GAP;
+    }
+  }
+  // Ensure single-group items have midY set
+  for (const p of planned) {
+    if (p.midY == null) p.midY = p.baseMidY;
+  }
+
+  // ── PASS 3: draw with adjusted Y positions ──
+  for (const p of planned) {
+    const { node, directChildren, barMinX, barMaxX, midY } = p;
+
+    // Vertical from parent down to midY
+    connGroup.append('line')
+      .attr('x1', node.centerX).attr('y1', node.y + CARD_H)
+      .attr('x2', node.centerX).attr('y2', midY)
+      .attr('class', 'conn-vertical');
+
+    // Horizontal bar at midY
+    if (barMaxX > barMinX) {
       connGroup.append('line')
-        .attr('x1', minX).attr('y1', midY)
-        .attr('x2', maxX).attr('y2', midY)
+        .attr('x1', barMinX).attr('y1', midY)
+        .attr('x2', barMaxX).attr('y2', midY)
         .attr('class', 'conn-horizontal');
     }
 
+    // Vertical from midY down to each child
     for (const cid of directChildren) {
       const cp = posMap.get(cid);
       connGroup.append('line')
@@ -497,19 +541,15 @@ function drawConnections(nodes) {
     }
   }
 
-  // CROSS-SUBTREE parent-child connections:
-  // For each rendered person who has parents also rendered but NOT connected above,
-  // draw a curved ancestry line from the parent couple to the child.
+  // ── CROSS-SUBTREE connections (routed to avoid overlap) ──
   const members = getMembers();
   for (const m of members) {
     if (!posMap.has(m.id)) continue;
-    if (connectedChildren.has(m.id)) continue; // already connected within subtree
+    if (connectedChildren.has(m.id)) continue;
 
-    // Check if any parent is rendered
     const parentIds = [m.fatherId, m.motherId].filter(pid => pid && posMap.has(pid));
     if (parentIds.length === 0) continue;
 
-    // Find the parent's couple node to get the couple center
     const parentId = parentIds[0];
     const parentNode = nodes.find(n =>
       n.member.id === parentId || n.spouse?.id === parentId
@@ -520,15 +560,14 @@ function drawConnections(nodes) {
     const parentCenterX = parentNode.centerX;
     const parentBottomY = parentNode.y + CARD_H;
 
-    // Draw a curved path from parent to child
+    // Routed stepped path: down from parent, horizontal, down to child
+    // Route outside the tree to avoid crossing internal connections
+    const routeY = parentBottomY + V_SPACING * 0.8;
     const path = d3.path();
     path.moveTo(parentCenterX, parentBottomY);
-    const midY = (parentBottomY + childPos.y) / 2;
-    path.bezierCurveTo(
-      parentCenterX, midY,
-      childPos.cx, midY,
-      childPos.cx, childPos.y
-    );
+    path.lineTo(parentCenterX, routeY);
+    path.lineTo(childPos.cx, routeY);
+    path.lineTo(childPos.cx, childPos.y);
 
     connGroup.append('path')
       .attr('d', path.toString())
