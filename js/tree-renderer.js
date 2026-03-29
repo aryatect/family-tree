@@ -112,18 +112,19 @@ function computeHiddenSet() {
   }
 
   // Hide ancestors when collapsed upward
+  const ancestorVisited = new Set();
   function hideAncestors(memberId) {
+    if (ancestorVisited.has(memberId)) return;
+    ancestorVisited.add(memberId);
     const m = getMemberById(memberId);
     if (!m) return;
+    // Only hide this member's direct father and mother — NOT via spouseIds
+    // This prevents accidentally hiding unrelated people through spouse chains
     const parentIds = [m.fatherId, m.motherId].filter(Boolean);
     for (const pid of parentIds) {
-      if (hidden.has(pid)) continue;
-      hidden.add(pid);
-      const parent = getMemberById(pid);
-      if (parent) {
-        // Hide parent's spouses
-        for (const sid of parent.spouseIds) hidden.add(sid);
-        // Recurse up
+      if (!hidden.has(pid)) {
+        hidden.add(pid);
+        // Recurse up through this parent's own parents
         hideAncestors(pid);
       }
     }
