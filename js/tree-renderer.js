@@ -2,8 +2,8 @@ import { getMembers, getMemberById, getState } from './data-store.js';
 import { getImageUrl } from './google-drive.js';
 import { formatDates, getInitials } from './utils.js';
 
-const CARD_W = 180;
-const CARD_H = 80;
+const CARD_W = 200;
+const CARD_H = 90;
 const COUPLE_GAP = 10;
 const H_SPACING = 60;
 const V_SPACING = 120;
@@ -270,8 +270,8 @@ function getNodeWidth(memberId) {
 }
 
 /**
- * Get children of a couple, but only those belonging to myLineage
- * (children from other lineages are rendered in their own subtree).
+ * Get children of a couple. Children are always shown under their parents
+ * regardless of lineage — the rendered/visited set prevents double rendering.
  */
 function getCoupleChildren(memberId, myLineage, hidden) {
   const m = getMemberById(memberId);
@@ -281,8 +281,7 @@ function getCoupleChildren(memberId, myLineage, hidden) {
     const spouse = getMemberById(sid);
     if (spouse) for (const cid of (spouse.childIds || [])) childSet.add(cid);
   }
-  // Only include children in our lineage and not hidden
-  return [...childSet].filter(cid => myLineage.has(cid) && !hidden.has(cid));
+  return [...childSet].filter(cid => !hidden.has(cid));
 }
 
 function computeWidth(memberId, visited, widthMap, myLineage, hidden) {
@@ -510,14 +509,22 @@ function drawCard(parent, member, x, y) {
   }
 
   const name = `${member.firstName} ${member.lastName}`.trim();
-  card.append('text').attr('x', 68).attr('y', CARD_H / 2 - 8)
+  const maxNameLen = 18;
+  card.append('text').attr('x', 68).attr('y', CARD_H / 2 - 10)
     .attr('class', 'card-name')
-    .text(name.length > 14 ? name.substring(0, 13) + '…' : name);
+    .text(name.length > maxNameLen ? name.substring(0, maxNameLen - 1) + '…' : name);
 
   const dates = formatDates(member);
   if (dates) {
-    card.append('text').attr('x', 68).attr('y', CARD_H / 2 + 10)
+    card.append('text').attr('x', 68).attr('y', CARD_H / 2 + 8)
       .attr('class', 'card-dates').text(dates);
+  }
+
+  // Relationship label (role)
+  const roleLabel = getRoleLabel(member);
+  if (roleLabel) {
+    card.append('text').attr('x', 68).attr('y', CARD_H / 2 + 24)
+      .attr('class', 'card-role').text(roleLabel);
   }
 
   // Collapse toggle for members with children
@@ -527,25 +534,58 @@ function drawCard(parent, member, x, y) {
     if (spouse) for (const cid of (spouse.childIds || [])) allChildIds.add(cid);
   }
   if (allChildIds.size > 0) {
+    // Check if this member OR any spouse is collapsed (couple state is shared)
+    const isCollapsed = isCoupleCollapsed(member.id);
     const toggleG = card.append('g')
       .attr('transform', `translate(${CARD_W / 2}, ${CARD_H})`)
       .attr('class', 'collapse-toggle')
       .style('cursor', 'pointer')
       .on('click', (event) => {
         event.stopPropagation();
-        toggleCollapse(member.id);
+        toggleCoupleCollapse(member.id);
       });
     toggleG.append('circle').attr('r', 10).attr('class', 'toggle-circle');
     toggleG.append('text').attr('text-anchor', 'middle').attr('dy', '0.35em')
       .attr('class', 'toggle-text')
-      .text(collapsedNodes.has(member.id) ? '+' : '−');
+      .text(isCollapsed ? '+' : '−');
   }
 }
 
-function toggleCollapse(memberId) {
-  if (collapsedNodes.has(memberId)) collapsedNodes.delete(memberId);
-  else collapsedNodes.add(memberId);
+/** Check if a member or any of their spouses is collapsed */
+function isCoupleCollapsed(memberId) {
+  if (collapsedNodes.has(memberId)) return true;
+  const m = getMemberById(memberId);
+  if (m) {
+    for (const sid of m.spouseIds) {
+      if (collapsedNodes.has(sid)) return true;
+    }
+  }
+  return false;
+}
+
+/** Toggle collapse for a member AND all their spouses in sync */
+function toggleCoupleCollapse(memberId) {
+  const m = getMemberById(memberId);
+  const coupleIds = [memberId];
+  if (m) for (const sid of m.spouseIds) coupleIds.push(sid);
+
+  const shouldCollapse = !isCoupleCollapsed(memberId);
+  for (const id of coupleIds) {
+    if (shouldCollapse) collapsedNodes.add(id);
+    else collapsedNodes.delete(id);
+  }
   renderTree();
+}
+
+function getRoleLabel(member) {
+  if (member.spouseIds.length > 0 && member.childIds.length > 0) {
+    return member.gender === 'F' ? 'Mother' : member.gender === 'M' ? 'Father' : 'Parent';
+  }
+  if (member.spouseIds.length > 0) return 'Spouse';
+  if (member.childIds.length > 0) {
+    return member.gender === 'F' ? 'Mother' : member.gender === 'M' ? 'Father' : 'Parent';
+  }
+  return null;
 }
 
 // ============================================================

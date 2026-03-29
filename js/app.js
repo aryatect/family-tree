@@ -3,6 +3,7 @@ import { initTree, renderTree, fitToScreen, zoomToMember, expandAll, collapseAll
 import { initSidePanel, openPanel, closePanel } from './side-panel.js';
 import { debounce } from './utils.js';
 import { requireAuth, logout } from './auth.js';
+import { getToken, setToken, hasToken, onSyncStatus, getSyncStatus, fetchFromGithub } from './github-sync.js';
 
 async function init() {
   await loadData();
@@ -134,6 +135,14 @@ async function init() {
     }
   });
 
+  // Settings
+  document.getElementById('btn-settings').addEventListener('click', showSettingsDialog);
+
+  // Sync status indicator
+  const syncStatusEl = document.getElementById('sync-status');
+  updateSyncIndicator(syncStatusEl);
+  onSyncStatus(() => updateSyncIndicator(syncStatusEl));
+
   // Logout
   document.getElementById('btn-logout').addEventListener('click', logout);
 
@@ -181,6 +190,56 @@ function updateThemeIcon(theme) {
   btn.innerHTML = theme === 'dark'
     ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>'
     : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+}
+
+function showSettingsDialog() {
+  const dialog = document.getElementById('settings-dialog');
+  dialog.style.display = 'flex';
+  const form = dialog.querySelector('#settings-form');
+  form.githubToken.value = getToken() || '';
+
+  const closeDialog = () => { dialog.style.display = 'none'; };
+
+  dialog.querySelector('.dialog-overlay').onclick = closeDialog;
+  dialog.querySelector('#settings-cancel').onclick = closeDialog;
+
+  dialog.querySelector('#settings-test').onclick = async () => {
+    const resultEl = dialog.querySelector('#sync-test-result');
+    const token = form.githubToken.value.trim();
+    if (!token) { resultEl.textContent = 'Enter a token first'; return; }
+    resultEl.textContent = 'Testing...';
+    setToken(token);
+    const result = await fetchFromGithub();
+    resultEl.textContent = result ? 'Connected successfully!' : 'Connection failed. Check your token.';
+    resultEl.style.color = result ? '#38a169' : '#e53e3e';
+  };
+
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const token = form.githubToken.value.trim();
+    setToken(token || null);
+    updateSyncIndicator(document.getElementById('sync-status'));
+    closeDialog();
+  };
+}
+
+function updateSyncIndicator(el) {
+  if (!hasToken()) {
+    el.textContent = '';
+    el.title = 'Sync not configured — click Settings';
+    el.className = 'sync-status';
+    return;
+  }
+  const statusMap = {
+    idle: { text: '●', cls: 'sync-idle', tip: 'Sync ready' },
+    syncing: { text: '↻', cls: 'sync-syncing', tip: 'Syncing...' },
+    synced: { text: '●', cls: 'sync-synced', tip: 'Synced' },
+    error: { text: '●', cls: 'sync-error', tip: 'Sync error' }
+  };
+  const s = statusMap[getSyncStatus()] || statusMap.idle;
+  el.textContent = s.text;
+  el.className = `sync-status ${s.cls}`;
+  el.title = s.tip;
 }
 
 requireAuth().then(() => init());

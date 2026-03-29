@@ -1,8 +1,10 @@
-import { generateId } from './utils.js';
+import { generateId, debounce } from './utils.js';
+import { fetchFromGithub, pushToGithub, hasToken } from './github-sync.js';
 
 const STORAGE_KEY = 'familyTreeData';
 let state = null;
 let listeners = [];
+const debouncedSync = debounce(() => syncToGithub(), 2000);
 
 export function subscribe(fn) {
   listeners.push(fn);
@@ -14,6 +16,19 @@ function notify() {
 }
 
 export async function loadData() {
+  // Try GitHub API first (latest cross-device data)
+  if (hasToken()) {
+    try {
+      const result = await fetchFromGithub();
+      if (result && result.data) {
+        state = result.data;
+        saveToStorage();
+        return state;
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Fall back to localStorage
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved) {
     try {
@@ -21,6 +36,8 @@ export async function loadData() {
       return state;
     } catch { /* fall through */ }
   }
+
+  // Fall back to static file
   try {
     const resp = await fetch('data/family.json');
     if (resp.ok) {
@@ -46,6 +63,13 @@ function createEmptyState() {
 function saveToStorage() {
   state.lastModified = new Date().toISOString();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  debouncedSync();
+}
+
+async function syncToGithub() {
+  if (hasToken() && state) {
+    await pushToGithub(state);
+  }
 }
 
 export function getState() { return state; }
@@ -134,6 +158,16 @@ export function addChild(parentId, childId) {
   if (!parent.childIds.includes(childId)) parent.childIds.push(childId);
   if (parent.gender === 'M') child.fatherId = parentId;
   else if (parent.gender === 'F') child.motherId = parentId;
+
+  // Also link to spouse(s) for consistency
+  for (const sid of parent.spouseIds) {
+    const spouse = getMemberById(sid);
+    if (spouse) {
+      if (!spouse.childIds.includes(childId)) spouse.childIds.push(childId);
+      if (spouse.gender === 'M' && !child.fatherId) child.fatherId = sid;
+      else if (spouse.gender === 'F' && !child.motherId) child.motherId = sid;
+    }
+  }
   saveToStorage();
   notify();
 }
@@ -145,6 +179,16 @@ export function setParent(childId, parentId) {
   if (parent.gender === 'M') child.fatherId = parentId;
   else if (parent.gender === 'F') child.motherId = parentId;
   if (!parent.childIds.includes(childId)) parent.childIds.push(childId);
+
+  // Also link to parent's spouse for consistency
+  for (const sid of parent.spouseIds) {
+    const spouse = getMemberById(sid);
+    if (spouse) {
+      if (!spouse.childIds.includes(childId)) spouse.childIds.push(childId);
+      if (spouse.gender === 'M' && !child.fatherId) child.fatherId = sid;
+      else if (spouse.gender === 'F' && !child.motherId) child.motherId = sid;
+    }
+  }
   saveToStorage();
   notify();
 }
