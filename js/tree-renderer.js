@@ -13,6 +13,7 @@ let svg, g, zoomBehavior;
 let onSelectMember = null;
 const fullName = (m) => `${m.firstName} ${m.lastName}`.trim();
 let collapsedNodes = new Set();
+let collapsedUpNodes = new Set();
 let cardPositions = new Map();
 
 let minimapSvg, minimapG, minimapViewbox;
@@ -108,6 +109,28 @@ function computeHiddenSet() {
 
   for (const id of collapsedNodes) {
     hideDescendants(id);
+  }
+
+  // Hide ancestors when collapsed upward
+  function hideAncestors(memberId) {
+    const m = getMemberById(memberId);
+    if (!m) return;
+    const parentIds = [m.fatherId, m.motherId].filter(Boolean);
+    for (const pid of parentIds) {
+      if (hidden.has(pid)) continue;
+      hidden.add(pid);
+      const parent = getMemberById(pid);
+      if (parent) {
+        // Hide parent's spouses
+        for (const sid of parent.spouseIds) hidden.add(sid);
+        // Recurse up
+        hideAncestors(pid);
+      }
+    }
+  }
+
+  for (const id of collapsedUpNodes) {
+    hideAncestors(id);
   }
 
   return hidden;
@@ -671,6 +694,27 @@ function drawCard(parent, member, x, y) {
       .attr('class', 'toggle-text')
       .text(isCollapsed ? '+' : '−');
   }
+
+  // Upward collapse toggle for members with parents
+  const hasParents = member.fatherId || member.motherId;
+  if (hasParents) {
+    // Show "+" if parents are hidden (by any sibling or self collapsing up)
+    const parentsVisible = (member.fatherId && cardPositions.has(member.fatherId)) ||
+                           (member.motherId && cardPositions.has(member.motherId));
+    const isCollapsedUp = !parentsVisible;
+    const toggleUpG = card.append('g')
+      .attr('transform', `translate(${CARD_W / 2}, 0)`)
+      .attr('class', 'collapse-toggle collapse-toggle-up')
+      .style('cursor', 'pointer')
+      .on('click', (event) => {
+        event.stopPropagation();
+        toggleCoupleCollapseUp(member.id);
+      });
+    toggleUpG.append('circle').attr('r', 10).attr('class', 'toggle-circle');
+    toggleUpG.append('text').attr('text-anchor', 'middle').attr('dy', '0.35em')
+      .attr('class', 'toggle-text')
+      .text(isCollapsedUp ? '+' : '−');
+  }
 }
 
 /** Check if a member or any of their spouses is collapsed */
@@ -695,6 +739,52 @@ function toggleCoupleCollapse(memberId) {
   for (const id of coupleIds) {
     if (shouldCollapse) collapsedNodes.add(id);
     else collapsedNodes.delete(id);
+  }
+  renderTree();
+}
+
+/** Check if a member or any of their spouses is collapsed upward */
+function isCoupleCollapsedUp(memberId) {
+  if (collapsedUpNodes.has(memberId)) return true;
+  const m = getMemberById(memberId);
+  if (m) {
+    for (const sid of m.spouseIds) {
+      if (collapsedUpNodes.has(sid)) return true;
+    }
+  }
+  return false;
+}
+
+/** Toggle upward collapse for a member AND all their spouses/siblings in sync */
+function toggleCoupleCollapseUp(memberId) {
+  const m = getMemberById(memberId);
+  const coupleIds = [memberId];
+  if (m) for (const sid of m.spouseIds) coupleIds.push(sid);
+
+  // Check if parents are currently visible (not collapsed by anyone)
+  const parentsVisible = (m.fatherId && !computeHiddenSet().has(m.fatherId)) ||
+                         (m.motherId && !computeHiddenSet().has(m.motherId));
+  const shouldCollapse = parentsVisible;
+
+  if (shouldCollapse) {
+    for (const id of coupleIds) collapsedUpNodes.add(id);
+  } else {
+    // Expanding: clear collapsedUp for self, spouse, AND all siblings
+    for (const id of coupleIds) collapsedUpNodes.delete(id);
+    // Also clear siblings who share the same parents
+    if (m) {
+      const siblingParentIds = [m.fatherId, m.motherId].filter(Boolean);
+      for (const pid of siblingParentIds) {
+        const parent = getMemberById(pid);
+        if (parent) {
+          for (const cid of parent.childIds) {
+            collapsedUpNodes.delete(cid);
+            const sibling = getMemberById(cid);
+            if (sibling) for (const sid of sibling.spouseIds) collapsedUpNodes.delete(sid);
+          }
+        }
+      }
+    }
   }
   renderTree();
 }
@@ -805,7 +895,7 @@ function updateMinimap(transform) {
     .attr('height', h * data.scale);
 }
 
-export function expandAll() { collapsedNodes.clear(); renderTree(); }
+export function expandAll() { collapsedNodes.clear(); collapsedUpNodes.clear(); renderTree(); }
 
 export function collapseAll() {
   for (const m of getMembers()) {
